@@ -21,3 +21,5 @@ prost-reflect = { version = "0.16.4", features = ["serde"] }
 prost-types = "0.14.1"
 protox = "0.9.1"
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
+tree-sitter = "0.26.9"
+tree-sitter-proto = "0.4.0"

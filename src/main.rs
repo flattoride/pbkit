@@ -7,7 +7,9 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
 use pbkit::{
+    lint::{LintDiagnostic, LintOptions, Severity, lint_proto},
     path::{parse_path, select},
+    proto_fmt::{FormatOptions, format_proto},
     proto_sort::{SortKey, sort_proto},
     reflect::{decode_to_json, load_pool},
     schema::{
@@ -34,7 +36,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Sort message/enum declarations and field lines in .proto text.
+    /// Sort message/enum declarations and field lines in .proto text. Prefer `fmt` for new use.
     Sort {
         /// Proto files to sort. Reads stdin when omitted.
         #[arg(value_hint = ValueHint::FilePath)]
@@ -45,6 +47,33 @@ enum Command {
         /// Sort fields by tag number or field name.
         #[arg(long, default_value = "number")]
         fields: FieldSort,
+    },
+    /// Format proto files after protobuf syntax validation.
+    Fmt {
+        /// Proto files to format. Reads stdin when omitted.
+        #[arg(value_hint = ValueHint::FilePath)]
+        files: Vec<PathBuf>,
+        /// Write formatted output back to each input file.
+        #[arg(short, long)]
+        write: bool,
+        /// Exit with a non-zero status when formatting would change output.
+        #[arg(long)]
+        check: bool,
+        /// Format without moving imports, declarations, or fields.
+        #[arg(long)]
+        without_sort: bool,
+        /// Sort fields by tag number or field name.
+        #[arg(long, default_value = "number")]
+        fields: FieldSort,
+    },
+    /// Lint proto files. By default this includes pbkit fmt/sort checks.
+    Lint {
+        /// Proto files to lint.
+        #[arg(required = true, value_hint = ValueHint::FilePath)]
+        files: Vec<PathBuf>,
+        /// Skip sort/order checks.
+        #[arg(long)]
+        without_sort: bool,
     },
     /// Decode a protobuf binary without descriptors into numbered wire fields.
     Decode {
@@ -146,6 +175,30 @@ fn main() -> Result<()> {
             write,
             fields,
         } => run_sort(files, write, fields.into()),
+        Command::Fmt {
+            files,
+            write,
+            check,
+            without_sort,
+            fields,
+        } => run_fmt(
+            files,
+            write,
+            check,
+            FormatOptions {
+                sort: !without_sort,
+                field_key: fields.into(),
+            },
+        ),
+        Command::Lint {
+            files,
+            without_sort,
+        } => run_lint(
+            files,
+            LintOptions {
+                check_sort: !without_sort,
+            },
+        ),
         Command::Decode { input } => {
             let bytes = read_input(input.as_ref())?;
             let decoded = to_json(&decode_message(&bytes)?);
@@ -214,6 +267,79 @@ fn run_sort(files: Vec<PathBuf>, write: bool, field_key: SortKey) -> Result<()> 
         }
     }
     Ok(())
+}
+
+fn run_fmt(files: Vec<PathBuf>, write: bool, check: bool, options: FormatOptions) -> Result<()> {
+    if files.is_empty() {
+        if write || check {
+            bail!("--write and --check require at least one input file");
+        }
+        let mut source = String::new();
+        io::stdin()
+            .read_to_string(&mut source)
+            .context("failed to read stdin")?;
+        print!("{}", format_proto(&source, options)?);
+        return Ok(());
+    }
+
+    let mut changed = false;
+    for file in files {
+        let source = std::fs::read_to_string(&file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+        let formatted = format_proto(&source, options)
+            .with_context(|| format!("failed to format {}", file.display()))?;
+        if formatted != source {
+            changed = true;
+        }
+        if write {
+            std::fs::write(&file, formatted)
+                .with_context(|| format!("failed to write {}", file.display()))?;
+        } else if !check {
+            print!("{formatted}");
+        }
+    }
+
+    if check && changed {
+        bail!("format check failed");
+    }
+    Ok(())
+}
+
+fn run_lint(files: Vec<PathBuf>, options: LintOptions) -> Result<()> {
+    let mut failed = false;
+    for file in files {
+        let source = std::fs::read_to_string(&file)
+            .with_context(|| format!("failed to read {}", file.display()))?;
+        let diagnostics = lint_proto(&source, options)
+            .with_context(|| format!("failed to lint {}", file.display()))?;
+        if !diagnostics.is_empty() {
+            failed = true;
+        }
+        print_lint_diagnostics(&file, &diagnostics);
+    }
+
+    if failed {
+        bail!("lint failed");
+    }
+    Ok(())
+}
+
+fn print_lint_diagnostics(file: &std::path::Path, diagnostics: &[LintDiagnostic]) {
+    for diagnostic in diagnostics {
+        let severity = match diagnostic.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        eprintln!(
+            "{}:{}:{}: {}[{}] {}",
+            file.display(),
+            diagnostic.line,
+            diagnostic.column,
+            severity,
+            diagnostic.rule,
+            diagnostic.message
+        );
+    }
 }
 
 fn run_query(
@@ -378,6 +504,8 @@ _pbkit_commands() {
   local -a commands
   commands=(
     'sort:Sort message/enum declarations and field lines'
+    'fmt:Format proto files'
+    'lint:Lint proto files'
     'decode:Decode protobuf binary without descriptors'
     'query:Query protobuf binary with a JSONPath-like selector'
     'completions:Generate shell completion scripts'
@@ -423,6 +551,25 @@ _pbkit_decode() {
     compadd -- --help
   else
     _files
+  fi
+}
+
+_pbkit_fmt() {
+  case "${words[CURRENT-1]}" in
+    --fields) compadd -- number name; return ;;
+  esac
+  if [[ "$PREFIX" == --* ]]; then
+    compadd -- --write --check --without-sort --fields --help
+  else
+    _pbkit_proto_files
+  fi
+}
+
+_pbkit_lint() {
+  if [[ "$PREFIX" == --* ]]; then
+    compadd -- --without-sort --help
+  else
+    _pbkit_proto_files
   fi
 }
 
@@ -491,6 +638,8 @@ _pbkit() {
 
   case "${words[2]}" in
     sort) _pbkit_sort ;;
+    fmt) _pbkit_fmt ;;
+    lint) _pbkit_lint ;;
     decode) _pbkit_decode ;;
     query) _pbkit_query ;;
     completions) _pbkit_completions ;;

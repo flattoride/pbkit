@@ -28,6 +28,23 @@ pbkit sort api.proto --write
 pbkit sort api.proto --fields name
 ```
 
+Format and lint proto files:
+
+```sh
+pbkit fmt api.proto
+pbkit fmt --write api.proto
+pbkit fmt --check api.proto
+pbkit fmt --without-sort api.proto
+
+pbkit lint api.proto
+pbkit lint --without-sort api.proto
+```
+
+`fmt` validates protobuf syntax before it rewrites anything. `lint` defaults to
+checking whether `pbkit fmt` would change the file; `--without-sort` skips the
+sort/order check and only reports syntax-level failures in this first lint
+iteration.
+
 Decode unknown protobuf wire data:
 
 ```sh
