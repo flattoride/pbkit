@@ -40,10 +40,10 @@ pbkit lint api.proto
 pbkit lint --without-sort api.proto
 ```
 
-`fmt` validates protobuf syntax before it rewrites anything. `lint` defaults to
-checking whether `pbkit fmt` would change the file; `--without-sort` skips the
-sort/order check and only reports syntax-level failures in this first lint
-iteration.
+`fmt` validates protobuf syntax before it rewrites anything and renders from the
+tree-sitter protobuf syntax tree. `lint` defaults to checking whether `pbkit fmt`
+would change the file; `--without-sort` skips the sort/order check and only
+reports syntax-level failures.
 
 Decode unknown protobuf wire data:
 
