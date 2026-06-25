@@ -49,6 +49,13 @@ enum Command {
         fields: FieldSort,
     },
     /// Format proto files after protobuf syntax validation.
+    #[command(after_help = "Default fmt behavior:
+  - normalizes layout with two-space indentation, stable spacing, and one trailing newline
+  - sorts imports
+  - sorts fields and enum values by number, or by name with --fields name
+  - sorts message, enum, service, and extend declarations
+
+Use --without-sort to keep all original import, declaration, field, and enum value order while still normalizing layout.")]
     Fmt {
         /// Proto files to format. Reads stdin when omitted.
         #[arg(value_hint = ValueHint::FilePath)]
@@ -59,13 +66,10 @@ enum Command {
         /// Exit with a non-zero status when formatting would change output.
         #[arg(long)]
         check: bool,
-        /// Format without moving imports, declarations, or fields.
+        /// Skip all sorting. Keeps import, declaration, field, and enum value order while still normalizing layout.
         #[arg(long)]
         without_sort: bool,
-        /// Also sort message, enum, service, and extend declarations.
-        #[arg(long)]
-        sort_declarations: bool,
-        /// Sort fields by tag number or field name.
+        /// Sort fields and enum values by tag number or name. Ignored with --without-sort.
         #[arg(long, default_value = "number")]
         fields: FieldSort,
     },
@@ -183,7 +187,6 @@ fn main() -> Result<()> {
             write,
             check,
             without_sort,
-            sort_declarations,
             fields,
         } => run_fmt(
             files,
@@ -192,7 +195,7 @@ fn main() -> Result<()> {
             FormatOptions {
                 sort_imports: !without_sort,
                 sort_fields: !without_sort,
-                sort_declarations: !without_sort && sort_declarations,
+                sort_declarations: !without_sort,
                 field_key: fields.into(),
             },
         ),
@@ -565,7 +568,7 @@ _pbkit_fmt() {
     --fields) compadd -- number name; return ;;
   esac
   if [[ "$PREFIX" == --* ]]; then
-    compadd -- --write --check --without-sort --sort-declarations --fields --help
+    compadd -- --write --check --without-sort --fields --help
   else
     _pbkit_proto_files
   fi

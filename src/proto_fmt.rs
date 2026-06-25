@@ -16,7 +16,7 @@ impl Default for FormatOptions {
         Self {
             sort_imports: true,
             sort_fields: true,
-            sort_declarations: false,
+            sort_declarations: true,
             field_key: SortKey::Number,
         }
     }
@@ -456,7 +456,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_by_sorting_imports_and_fields() {
+    fn formats_by_sorting_imports_fields_and_declarations() {
         let input = r#"syntax = "proto3";
 import "z.proto";
 import "a.proto";
@@ -467,12 +467,12 @@ message A {}
         assert!(
             output.find("import \"a.proto\"").unwrap() < output.find("import \"z.proto\"").unwrap()
         );
-        assert!(output.find("message Z").unwrap() < output.find("message A").unwrap());
+        assert!(output.find("message A").unwrap() < output.find("message Z").unwrap());
         assert!(output.contains("message Z {\n  string a = 1;\n  string b = 2;\n}"));
     }
 
     #[test]
-    fn can_sort_declarations_when_requested() {
+    fn can_skip_all_sorting() {
         let input = r#"syntax = "proto3";
 message Z {}
 message A {}
@@ -480,12 +480,14 @@ message A {}
         let output = format_proto(
             input,
             FormatOptions {
-                sort_declarations: true,
+                sort_imports: false,
+                sort_fields: false,
+                sort_declarations: false,
                 ..FormatOptions::default()
             },
         )
         .unwrap();
-        assert!(output.find("message A").unwrap() < output.find("message Z").unwrap());
+        assert!(output.find("message Z").unwrap() < output.find("message A").unwrap());
     }
 
     #[test]
@@ -504,7 +506,7 @@ message Outer { message Z {} message A {} enum E { TWO = 2; ONE = 1; } string b=
 "#;
         let output = format_proto(input, FormatOptions::default()).unwrap();
         assert!(output.contains("message A {}") || output.contains("message A {\n}"));
-        assert!(output.find("message Z").unwrap() < output.find("message A").unwrap());
+        assert!(output.find("message A").unwrap() < output.find("message Z").unwrap());
         assert!(output.find("string a = 1").unwrap() < output.find("string b = 2").unwrap());
     }
 
