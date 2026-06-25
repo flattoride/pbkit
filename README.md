@@ -35,6 +35,7 @@ pbkit fmt api.proto
 pbkit fmt --write api.proto
 pbkit fmt --check api.proto
 pbkit fmt --without-sort api.proto
+pbkit fmt --sort-declarations api.proto
 
 pbkit lint api.proto
 pbkit lint --without-sort api.proto
@@ -44,6 +45,16 @@ pbkit lint --without-sort api.proto
 tree-sitter protobuf syntax tree. `lint` defaults to checking whether `pbkit fmt`
 would change the file; `--without-sort` skips the sort/order check and only
 reports syntax-level failures.
+
+`pbkit fmt` v1 uses a canonical style:
+
+- two-space indentation, with tabs removed from indentation
+- one trailing newline
+- one blank line between top-level layout groups
+- imports sorted by default
+- fields and enum values sorted by number by default
+- declarations keep source order by default; use `--sort-declarations` to sort them
+- `--without-sort` keeps declaration, import, and field order while still normalizing layout
 
 Decode unknown protobuf wire data:
 

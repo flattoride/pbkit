@@ -62,6 +62,9 @@ enum Command {
         /// Format without moving imports, declarations, or fields.
         #[arg(long)]
         without_sort: bool,
+        /// Also sort message, enum, service, and extend declarations.
+        #[arg(long)]
+        sort_declarations: bool,
         /// Sort fields by tag number or field name.
         #[arg(long, default_value = "number")]
         fields: FieldSort,
@@ -180,13 +183,16 @@ fn main() -> Result<()> {
             write,
             check,
             without_sort,
+            sort_declarations,
             fields,
         } => run_fmt(
             files,
             write,
             check,
             FormatOptions {
-                sort: !without_sort,
+                sort_imports: !without_sort,
+                sort_fields: !without_sort,
+                sort_declarations: !without_sort && sort_declarations,
                 field_key: fields.into(),
             },
         ),
@@ -559,7 +565,7 @@ _pbkit_fmt() {
     --fields) compadd -- number name; return ;;
   esac
   if [[ "$PREFIX" == --* ]]; then
-    compadd -- --write --check --without-sort --fields --help
+    compadd -- --write --check --without-sort --sort-declarations --fields --help
   else
     _pbkit_proto_files
   fi

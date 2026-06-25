@@ -5,14 +5,18 @@ use crate::{proto_sort::SortKey, syntax::parse_proto};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormatOptions {
-    pub sort: bool,
+    pub sort_imports: bool,
+    pub sort_fields: bool,
+    pub sort_declarations: bool,
     pub field_key: SortKey,
 }
 
 impl Default for FormatOptions {
     fn default() -> Self {
         Self {
-            sort: true,
+            sort_imports: true,
+            sort_fields: true,
+            sort_declarations: false,
             field_key: SortKey::Number,
         }
     }
@@ -49,8 +53,10 @@ struct Item<'a> {
 impl<'a> Renderer<'a> {
     fn render_source(&mut self, node: Node<'a>) -> String {
         let mut items = self.collect_items(node);
-        if self.options.sort {
+        if self.options.sort_imports {
             sort_imports(&mut items, self.source);
+        }
+        if self.options.sort_declarations {
             sort_declarations(&mut items, self.source);
         }
         self.render_items(&items, 0)
@@ -122,8 +128,10 @@ impl<'a> Renderer<'a> {
         let mut out = format!("{}{} {} {{", indent_text(indent), keyword, name.trim());
         if let Some(body) = body {
             let mut items = self.collect_items(body);
-            if self.options.sort {
+            if self.options.sort_declarations {
                 sort_declarations(&mut items, self.source);
+            }
+            if self.options.sort_fields {
                 sort_fields(&mut items, self.source, self.options.field_key);
             }
             if !items.is_empty() {
@@ -164,7 +172,7 @@ impl<'a> Renderer<'a> {
             .into_iter()
             .filter(|item| item.node.kind() != "identifier")
             .collect::<Vec<_>>();
-        if self.options.sort {
+        if self.options.sort_fields {
             sort_fields(&mut items, self.source, self.options.field_key);
         }
 
@@ -190,7 +198,7 @@ impl<'a> Renderer<'a> {
         let mut out = format!("{}extend {} {{", indent_text(indent), name);
         if let Some(body) = body {
             let mut items = self.collect_items(body);
-            if self.options.sort {
+            if self.options.sort_fields {
                 sort_fields(&mut items, self.source, self.options.field_key);
             }
             if !items.is_empty() {
@@ -448,7 +456,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_by_sorting_imports_and_declarations() {
+    fn formats_by_sorting_imports_and_fields() {
         let input = r#"syntax = "proto3";
 import "z.proto";
 import "a.proto";
@@ -459,8 +467,25 @@ message A {}
         assert!(
             output.find("import \"a.proto\"").unwrap() < output.find("import \"z.proto\"").unwrap()
         );
-        assert!(output.find("message A").unwrap() < output.find("message Z").unwrap());
+        assert!(output.find("message Z").unwrap() < output.find("message A").unwrap());
         assert!(output.contains("message Z {\n  string a = 1;\n  string b = 2;\n}"));
+    }
+
+    #[test]
+    fn can_sort_declarations_when_requested() {
+        let input = r#"syntax = "proto3";
+message Z {}
+message A {}
+"#;
+        let output = format_proto(
+            input,
+            FormatOptions {
+                sort_declarations: true,
+                ..FormatOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(output.find("message A").unwrap() < output.find("message Z").unwrap());
     }
 
     #[test]
@@ -479,7 +504,7 @@ message Outer { message Z {} message A {} enum E { TWO = 2; ONE = 1; } string b=
 "#;
         let output = format_proto(input, FormatOptions::default()).unwrap();
         assert!(output.contains("message A {}") || output.contains("message A {\n}"));
-        assert!(output.find("message A").unwrap() < output.find("message Z").unwrap());
+        assert!(output.find("message Z").unwrap() < output.find("message A").unwrap());
         assert!(output.find("string a = 1").unwrap() < output.find("string b = 2").unwrap());
     }
 
