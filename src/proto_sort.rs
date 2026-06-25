@@ -16,9 +16,8 @@ pub fn sort_proto(source: &str, field_key: SortKey) -> Result<String> {
 }
 
 fn sort_scope(lines: &[String], field_key: SortKey) -> String {
-    let mut output = Vec::new();
+    let mut items = Vec::new();
     let mut i = 0;
-    let mut declaration_slots = Vec::<(usize, SortItem)>::new();
 
     while i < lines.len() {
         if let Some((kind, name)) = parse_declaration(&lines[i]) {
@@ -29,26 +28,36 @@ fn sort_scope(lines: &[String], field_key: SortKey) -> String {
                 let inner_lines = inner.lines().map(str::to_owned).collect::<Vec<_>>();
                 chunk.splice(1..chunk.len() - 1, inner_lines);
             }
-            let slot = output.len();
-            output.extend(chunk.clone());
-            declaration_slots.push((
-                slot,
-                SortItem {
-                    key: format!("{kind}:{name}"),
-                    lines: chunk,
-                },
-            ));
+            items.push(ScopeItem::Block(SortItem {
+                key: format!("{kind}:{name}"),
+                lines: chunk,
+            }));
             i = end + 1;
             continue;
         }
 
-        output.push(lines[i].clone());
+        items.push(ScopeItem::Line(lines[i].clone()));
         i += 1;
     }
 
-    replace_sorted_slots(&mut output, declaration_slots);
+    sort_declaration_items(&mut items);
+
+    let mut output = Vec::new();
+    for item in items {
+        match item {
+            ScopeItem::Line(line) => output.push(line),
+            ScopeItem::Block(block) => output.extend(block.lines),
+        }
+    }
+
     sort_field_runs(&mut output, field_key);
     output.join("\n")
+}
+
+#[derive(Debug, Clone)]
+enum ScopeItem {
+    Line(String),
+    Block(SortItem),
 }
 
 #[derive(Debug, Clone)]
@@ -57,19 +66,24 @@ struct SortItem {
     lines: Vec<String>,
 }
 
-fn replace_sorted_slots(lines: &mut Vec<String>, mut slots: Vec<(usize, SortItem)>) {
-    if slots.len() < 2 {
+fn sort_declaration_items(items: &mut [ScopeItem]) {
+    let mut slots = Vec::new();
+    let mut blocks = Vec::new();
+
+    for (index, item) in items.iter().enumerate() {
+        if let ScopeItem::Block(block) = item {
+            slots.push(index);
+            blocks.push(block.clone());
+        }
+    }
+
+    if blocks.len() < 2 {
         return;
     }
-    let mut sorted = slots
-        .iter()
-        .map(|(_, item)| item.clone())
-        .collect::<Vec<_>>();
-    sorted.sort_by(|a, b| a.key.cmp(&b.key));
 
-    slots.sort_by_key(|(index, _)| *index);
-    for ((index, old), new) in slots.into_iter().zip(sorted.into_iter()) {
-        lines.splice(index..index + old.lines.len(), new.lines);
+    blocks.sort_by(|a, b| a.key.cmp(&b.key));
+    for (index, block) in slots.into_iter().zip(blocks) {
+        items[index] = ScopeItem::Block(block);
     }
 }
 
@@ -198,5 +212,30 @@ enum A {
         let out = sort_proto(input, SortKey::Number).unwrap();
         assert!(out.find("enum A").unwrap() < out.find("message Z").unwrap());
         assert!(out.find("int32 a = 1").unwrap() < out.find("string b = 2").unwrap());
+    }
+
+    #[test]
+    fn swaps_whole_blocks_without_reusing_stale_offsets() {
+        let input = r#"message Z {
+  string z1 = 1;
+  string z2 = 2;
+  string z3 = 3;
+}
+message A {
+  string a = 1;
+}
+"#;
+        let expected = r#"message A {
+  string a = 1;
+}
+message Z {
+  string z1 = 1;
+  string z2 = 2;
+  string z3 = 3;
+}
+"#;
+
+        let out = sort_proto(input, SortKey::Number).unwrap();
+        assert_eq!(out, expected);
     }
 }
