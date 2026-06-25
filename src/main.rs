@@ -4,11 +4,15 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
+use clap_complete::Shell;
 use pbkit::{
     path::{parse_path, select},
     proto_sort::{SortKey, sort_proto},
     reflect::{decode_to_json, load_pool},
+    schema::{
+        Candidate, enum_candidates, field_candidates, message_candidates, query_path_candidates,
+    },
     wire::{decode_message, raw_bytes_from_json, to_json},
 };
 use serde_json::Value;
@@ -16,7 +20,12 @@ use serde_json::Value;
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "A pragmatic protobuf sorting and binary query toolkit."
+    about = "A pragmatic protobuf sorting and binary query toolkit.",
+    after_help = "Shell completions:
+  zsh:  mkdir -p ~/.zfunc && pbkit completions zsh > ~/.zfunc/_pbkit
+        then add `fpath=(~/.zfunc $fpath); autoload -Uz compinit; compinit` to ~/.zshrc
+  bash: pbkit completions bash > pbkit.bash && source pbkit.bash
+  fish: pbkit completions fish > ~/.config/fish/completions/pbkit.fish"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -28,6 +37,7 @@ enum Command {
     /// Sort message/enum declarations and field lines in .proto text.
     Sort {
         /// Proto files to sort. Reads stdin when omitted.
+        #[arg(value_hint = ValueHint::FilePath)]
         files: Vec<PathBuf>,
         /// Write sorted output back to each input file.
         #[arg(short, long)]
@@ -39,6 +49,7 @@ enum Command {
     /// Decode a protobuf binary without descriptors into numbered wire fields.
     Decode {
         /// Optional protobuf binary input. Reads stdin when omitted.
+        #[arg(value_hint = ValueHint::FilePath)]
         input: Option<PathBuf>,
     },
     /// Query a protobuf binary using a small JSONPath-like selector.
@@ -46,22 +57,61 @@ enum Command {
         /// Path such as '$.items[0].id' for descriptors or '$.2[0].message.1[0]' for raw wire data.
         path: String,
         /// Optional protobuf binary input. Reads stdin when omitted.
+        #[arg(value_hint = ValueHint::FilePath)]
         input: Option<PathBuf>,
         /// Fully-qualified message name used with --descriptor-set or --proto.
         #[arg(short, long)]
         message: Option<String>,
         /// Binary FileDescriptorSet produced by protoc --descriptor_set_out.
-        #[arg(long)]
+        #[arg(long, value_hint = ValueHint::FilePath)]
         descriptor_set: Option<PathBuf>,
         /// Proto source file. Can be repeated.
-        #[arg(long = "proto")]
+        #[arg(long = "proto", value_hint = ValueHint::FilePath)]
         proto_files: Vec<PathBuf>,
         /// Proto include path. Can be repeated. Defaults to current directory.
-        #[arg(short = 'I', long = "include")]
+        #[arg(short = 'I', long = "include", value_hint = ValueHint::DirPath)]
         includes: Vec<PathBuf>,
         /// Output selected data as json, raw bytes, hex, or base64.
         #[arg(short, long, default_value = "json")]
         format: OutputFormat,
+    },
+    /// Generate shell completion scripts.
+    #[command(after_help = "Install example:
+  mkdir -p ~/.zfunc
+  pbkit completions zsh > ~/.zfunc/_pbkit
+
+Then ensure ~/.zshrc contains:
+  fpath=(~/.zfunc $fpath)
+  autoload -Uz compinit
+  compinit
+
+The zsh script includes dynamic proto-aware completion for --proto, --message, fields, and query paths.")]
+    Completions {
+        /// Shell to generate completions for.
+        shell: Shell,
+    },
+    /// Print proto-aware completion candidates, one per line.
+    Complete {
+        /// Candidate type to print.
+        target: CompleteTarget,
+        /// Candidate prefix. For query-path, pass the partial path such as '$.user.n'.
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// Fully-qualified message name used for fields or query-path.
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Binary FileDescriptorSet produced by protoc --descriptor_set_out.
+        #[arg(long, value_hint = ValueHint::FilePath)]
+        descriptor_set: Option<PathBuf>,
+        /// Proto source file. Can be repeated.
+        #[arg(long = "proto", value_hint = ValueHint::FilePath)]
+        proto_files: Vec<PathBuf>,
+        /// Proto include path. Can be repeated. Defaults to current directory.
+        #[arg(short = 'I', long = "include", value_hint = ValueHint::DirPath)]
+        includes: Vec<PathBuf>,
+        /// Include tab-separated type details after each value.
+        #[arg(long)]
+        details: bool,
     },
 }
 
@@ -77,6 +127,15 @@ enum OutputFormat {
     Raw,
     Hex,
     Base64,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CompleteTarget {
+    ProtoFiles,
+    Messages,
+    Enums,
+    Fields,
+    QueryPath,
 }
 
 fn main() -> Result<()> {
@@ -108,6 +167,24 @@ fn main() -> Result<()> {
             proto_files,
             includes,
             format,
+        ),
+        Command::Completions { shell } => run_completions(shell),
+        Command::Complete {
+            target,
+            prefix,
+            message,
+            descriptor_set,
+            proto_files,
+            includes,
+            details,
+        } => run_complete(
+            target,
+            &prefix,
+            message,
+            descriptor_set,
+            proto_files,
+            includes,
+            details,
         ),
     }
 }
@@ -160,6 +237,358 @@ fn run_query(
     let path = parse_path(query)?;
     let selected = select(&root, &path).with_context(|| format!("path {query:?} did not match"))?;
     write_value(selected, format)
+}
+
+fn run_completions(shell: Shell) -> Result<()> {
+    if shell == Shell::Zsh {
+        print!("{}", enhanced_zsh_completion());
+        return Ok(());
+    }
+
+    let mut command = Cli::command();
+    clap_complete::generate(shell, &mut command, "pbkit", &mut io::stdout());
+    Ok(())
+}
+
+fn enhanced_zsh_completion() -> &'static str {
+    r#"#compdef pbkit
+
+# Generated by `pbkit completions zsh`.
+# Install:
+#   mkdir -p ~/.zfunc
+#   pbkit completions zsh > ~/.zfunc/_pbkit
+#   echo 'fpath=(~/.zfunc $fpath); autoload -Uz compinit; compinit' >> ~/.zshrc
+#
+# This completion calls `pbkit complete ...` for proto-aware candidates.
+
+_pbkit_schema_args() {
+  reply=()
+  local i word next
+  for (( i = 1; i < CURRENT; i++ )); do
+    word="${words[i]}"
+    case "$word" in
+      --descriptor-set)
+        next="${words[i+1]}"
+        [[ -n "$next" && "$next" != -* ]] && reply+=(--descriptor-set "$next")
+        ;;
+      --descriptor-set=*)
+        reply+=(--descriptor-set "${word#--descriptor-set=}")
+        ;;
+      --proto)
+        next="${words[i+1]}"
+        [[ -n "$next" && "$next" != -* ]] && reply+=(--proto "$next")
+        ;;
+      --proto=*)
+        reply+=(--proto "${word#--proto=}")
+        ;;
+      -I|--include)
+        next="${words[i+1]}"
+        [[ -n "$next" && "$next" != -* ]] && reply+=(-I "$next")
+        ;;
+      -I?*)
+        reply+=(-I "${word#-I}")
+        ;;
+      --include=*)
+        reply+=(-I "${word#--include=}")
+        ;;
+    esac
+  done
+}
+
+_pbkit_message_arg() {
+  reply=()
+  local i word next
+  for (( i = 1; i < CURRENT; i++ )); do
+    word="${words[i]}"
+    case "$word" in
+      -m|--message)
+        next="${words[i+1]}"
+        [[ -n "$next" && "$next" != -* ]] && reply=("$next")
+        ;;
+      --message=*)
+        reply=("${word#--message=}")
+        ;;
+    esac
+  done
+}
+
+_pbkit_describe_lines() {
+  local tag="$1"
+  local label="$2"
+  shift 2
+  local -a rows matches
+  rows=("$@")
+  matches=()
+  local row value detail
+  for row in "${rows[@]}"; do
+    value="${row%%	*}"
+    if [[ "$row" == *$'\t'* ]]; then
+      detail="${row#*	}"
+      matches+=("${value}:${detail}")
+    else
+      matches+=("${value}")
+    fi
+  done
+  (( ${#matches[@]} )) && _describe -t "$tag" "$label" matches
+}
+
+_pbkit_proto_files() {
+  _pbkit_schema_args
+  local -a schema_args rows
+  schema_args=("${reply[@]}")
+  rows=("${(@f)$(${words[1]} complete proto-files "${schema_args[@]}" --prefix "$PREFIX" --details 2>/dev/null)}")
+  if (( ${#rows[@]} )); then
+    _pbkit_describe_lines proto-files 'proto files' "${rows[@]}"
+  else
+    _files -g '*.proto'
+  fi
+}
+
+_pbkit_messages() {
+  _pbkit_schema_args
+  local -a schema_args rows
+  schema_args=("${reply[@]}")
+  rows=("${(@f)$(${words[1]} complete messages "${schema_args[@]}" --prefix "$PREFIX" --details 2>/dev/null)}")
+  _pbkit_describe_lines messages 'messages' "${rows[@]}"
+}
+
+_pbkit_fields() {
+  _pbkit_schema_args
+  local -a schema_args message rows
+  schema_args=("${reply[@]}")
+  _pbkit_message_arg
+  message="${reply[1]}"
+  [[ -z "$message" ]] && return 1
+  rows=("${(@f)$(${words[1]} complete fields "${schema_args[@]}" --message "$message" --prefix "$PREFIX" --details 2>/dev/null)}")
+  _pbkit_describe_lines fields 'fields' "${rows[@]}"
+}
+
+_pbkit_query_paths() {
+  _pbkit_schema_args
+  local -a schema_args message rows
+  schema_args=("${reply[@]}")
+  _pbkit_message_arg
+  message="${reply[1]}"
+  [[ -z "$message" ]] && return 1
+  rows=("${(@f)$(${words[1]} complete query-path "${schema_args[@]}" --message "$message" --prefix "$PREFIX" --details 2>/dev/null)}")
+  _pbkit_describe_lines query-paths 'query paths' "${rows[@]}"
+}
+
+_pbkit_commands() {
+  local -a commands
+  commands=(
+    'sort:Sort message/enum declarations and field lines'
+    'decode:Decode protobuf binary without descriptors'
+    'query:Query protobuf binary with a JSONPath-like selector'
+    'completions:Generate shell completion scripts'
+    'complete:Print proto-aware completion candidates'
+    'help:Print help'
+  )
+  _describe -t commands 'pbkit commands' commands
+}
+
+_pbkit_complete_targets() {
+  local -a targets
+  targets=(
+    'proto-files:Proto files from -I/current directory'
+    'messages:Message names from descriptors'
+    'enums:Enum names from descriptors'
+    'fields:Field names for --message'
+    'query-path:JSONPath-like field paths for --message'
+  )
+  _describe -t complete-targets 'completion target' targets
+}
+
+_pbkit_option_or_file() {
+  if [[ "$PREFIX" == --* ]]; then
+    compadd -- --help
+  else
+    _files
+  fi
+}
+
+_pbkit_sort() {
+  case "${words[CURRENT-1]}" in
+    --fields) compadd -- number name; return ;;
+  esac
+  if [[ "$PREFIX" == --* ]]; then
+    compadd -- --write --fields --help
+  else
+    _pbkit_proto_files
+  fi
+}
+
+_pbkit_decode() {
+  if [[ "$PREFIX" == --* ]]; then
+    compadd -- --help
+  else
+    _files
+  fi
+}
+
+_pbkit_query() {
+  case "${words[CURRENT-1]}" in
+    --proto) _pbkit_proto_files; return ;;
+    -I|--include) _directories; return ;;
+    --descriptor-set) _files; return ;;
+    -m|--message) _pbkit_messages; return ;;
+    -o|--format) compadd -- json raw hex base64; return ;;
+  esac
+  if [[ "$PREFIX" == --* ]]; then
+    compadd -- --message --descriptor-set --proto --include --format --help
+  elif [[ "$PREFIX" == '$'* || "$PREFIX" == .* ]]; then
+    _pbkit_query_paths || _files
+  else
+    _pbkit_query_paths || _files
+  fi
+}
+
+_pbkit_completions() {
+  compadd -- bash elvish fish powershell zsh
+}
+
+_pbkit_complete_cmd() {
+  local target=""
+  local i
+  for (( i = 3; i < CURRENT; i++ )); do
+    if [[ "${words[i]}" != -* ]]; then
+      target="${words[i]}"
+      break
+    fi
+  done
+
+  case "${words[CURRENT-1]}" in
+    --proto) _pbkit_proto_files; return ;;
+    -I|--include) _directories; return ;;
+    --descriptor-set) _files; return ;;
+    -m|--message) _pbkit_messages; return ;;
+  esac
+
+  if (( CURRENT == 3 )); then
+    _pbkit_complete_targets
+    return
+  fi
+
+  if [[ "$PREFIX" == --* ]]; then
+    compadd -- --prefix --message --descriptor-set --proto --include --details --help
+  else
+    case "$target" in
+      proto-files) _pbkit_proto_files ;;
+      messages) _pbkit_messages ;;
+      enums) compadd -- ;;
+      fields) _pbkit_fields ;;
+      query-path) _pbkit_query_paths ;;
+      *) _pbkit_complete_targets ;;
+    esac
+  fi
+}
+
+_pbkit() {
+  if (( CURRENT == 2 )); then
+    _pbkit_commands
+    return
+  fi
+
+  case "${words[2]}" in
+    sort) _pbkit_sort ;;
+    decode) _pbkit_decode ;;
+    query) _pbkit_query ;;
+    completions) _pbkit_completions ;;
+    complete) _pbkit_complete_cmd ;;
+    help) _pbkit_commands ;;
+    *) _pbkit_commands ;;
+  esac
+}
+
+_pbkit "$@"
+"#
+}
+
+fn run_complete(
+    target: CompleteTarget,
+    prefix: &str,
+    message: Option<String>,
+    descriptor_set: Option<PathBuf>,
+    proto_files: Vec<PathBuf>,
+    includes: Vec<PathBuf>,
+    details: bool,
+) -> Result<()> {
+    if matches!(target, CompleteTarget::ProtoFiles) {
+        print_candidates(&proto_file_candidates(&includes, prefix)?, details);
+        return Ok(());
+    }
+
+    if descriptor_set.is_none() && proto_files.is_empty() {
+        bail!("complete requires --descriptor-set or at least one --proto file");
+    }
+
+    let pool = load_pool(descriptor_set.as_deref(), &proto_files, &includes)?;
+    let candidates = match target {
+        CompleteTarget::ProtoFiles => unreachable!(),
+        CompleteTarget::Messages => message_candidates(&pool, prefix),
+        CompleteTarget::Enums => enum_candidates(&pool, prefix),
+        CompleteTarget::Fields => {
+            let message = message.context("--message is required for field completion")?;
+            field_candidates(&pool, &message, prefix)?
+        }
+        CompleteTarget::QueryPath => {
+            let message = message.context("--message is required for query-path completion")?;
+            query_path_candidates(&pool, &message, prefix)?
+        }
+    };
+
+    print_candidates(&candidates, details);
+    Ok(())
+}
+
+fn proto_file_candidates(includes: &[PathBuf], prefix: &str) -> Result<Vec<Candidate>> {
+    let mut roots = if includes.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        includes.to_vec()
+    };
+    if !roots.iter().any(|root| root == &PathBuf::from(".")) {
+        roots.push(PathBuf::from("."));
+    }
+
+    let mut candidates = Vec::new();
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("proto") {
+                continue;
+            }
+            let value = path.display().to_string();
+            if value.starts_with(prefix)
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(prefix))
+            {
+                candidates.push(Candidate {
+                    value,
+                    detail: "proto".into(),
+                });
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.value.cmp(&b.value));
+    candidates.dedup_by(|a, b| a.value == b.value);
+    Ok(candidates)
+}
+
+fn print_candidates(candidates: &[Candidate], details: bool) {
+    for candidate in candidates {
+        if details {
+            println!("{}\t{}", candidate.value, candidate.detail);
+        } else {
+            println!("{}", candidate.value);
+        }
+    }
 }
 
 fn read_input(input: Option<&PathBuf>) -> Result<Vec<u8>> {

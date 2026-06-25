@@ -56,6 +56,41 @@ there is no `protoc` dependency for this path:
 cat pb.bin | pbkit query '$.user.id' --proto schema.proto -I . --message my.pkg.Envelope
 ```
 
+Generate shell completions:
+
+```sh
+mkdir -p ~/.zfunc
+pbkit completions zsh > _pbkit
+pbkit completions bash > pbkit.bash
+pbkit completions fish > pbkit.fish
+```
+
+For zsh, install the generated completion once:
+
+```sh
+mkdir -p ~/.zfunc
+pbkit completions zsh > ~/.zfunc/_pbkit
+```
+
+Then ensure `~/.zshrc` contains:
+
+```sh
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit
+compinit
+```
+
+The zsh completion calls `pbkit complete ...` on Tab, so it can suggest proto
+files from `-I`, message names, field names, and query paths. `pbkit` also
+exposes those proto-aware candidates directly for editor integrations:
+
+```sh
+pbkit complete proto-files -I protos --prefix user
+pbkit complete messages --proto schema.proto -I . --prefix my.pkg.
+pbkit complete fields --proto schema.proto -I . --message my.pkg.Envelope --prefix user
+pbkit complete query-path --proto schema.proto -I . --message my.pkg.Envelope --prefix '$.user.n'
+```
+
 ## Path Syntax
 
 The selector intentionally starts small:
