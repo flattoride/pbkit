@@ -81,6 +81,9 @@ pub fn raw_bytes_from_json(value: &Value) -> Option<Vec<u8>> {
             .decode(bytes.as_bytes())
             .ok();
     }
+    if let Some(bytes) = value.as_str() {
+        return decode_json_base64(bytes);
+    }
     if let Some(array) = value.as_array() {
         let mut out = Vec::new();
         for item in array {
@@ -89,6 +92,17 @@ pub fn raw_bytes_from_json(value: &Value) -> Option<Vec<u8>> {
         return Some(out);
     }
     None
+}
+
+fn decode_json_base64(value: &str) -> Option<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value.as_bytes())
+        .ok()
+        .or_else(|| {
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(value.as_bytes())
+                .ok()
+        })
 }
 
 fn raw_value_to_json(value: &RawValue) -> Value {
@@ -155,5 +169,22 @@ mod tests {
         let json = to_json(&decoded);
         assert_eq!(json["1"][0]["value"], 150);
         assert_eq!(json["2"][0]["utf8"], "foo");
+    }
+
+    #[test]
+    fn extracts_descriptor_style_base64_bytes() {
+        assert_eq!(
+            raw_bytes_from_json(&Value::String("Zm9v".into()))
+                .unwrap()
+                .as_slice(),
+            b"foo"
+        );
+        assert_eq!(
+            raw_bytes_from_json(&json!(["Zm8", "bw"]))
+                .unwrap()
+                .as_slice(),
+            b"foo"
+        );
+        assert!(raw_bytes_from_json(&Value::String("not base64!".into())).is_none());
     }
 }

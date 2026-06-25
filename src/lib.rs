@@ -1,3 +1,4 @@
+pub mod config;
 pub mod lint;
 pub mod path;
 pub mod proto_fmt;

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use prost_reflect::{DescriptorPool, Kind, MessageDescriptor};
+use prost_reflect::{DescriptorPool, FieldDescriptor, Kind, MessageDescriptor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
@@ -33,7 +33,12 @@ pub fn field_candidates(
     let descriptor = pool
         .get_message_by_name(message)
         .with_context(|| format!("message type {message:?} not found in descriptors"))?;
-    Ok(field_candidates_for_message(&descriptor, prefix, ""))
+    Ok(field_candidates_for_message(
+        &descriptor,
+        prefix,
+        "",
+        CandidateMode::Field,
+    ))
 }
 
 pub fn query_path_candidates(
@@ -51,15 +56,23 @@ pub fn query_path_candidates(
         &descriptor,
         field_prefix,
         parent_path,
+        CandidateMode::QueryPath,
     ))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateMode {
+    Field,
+    QueryPath,
 }
 
 fn field_candidates_for_message(
     descriptor: &MessageDescriptor,
     prefix: &str,
     path_prefix: &str,
+    mode: CandidateMode,
 ) -> Vec<Candidate> {
-    sorted_candidates(descriptor.fields().filter_map(|field| {
+    sorted_candidates(descriptor.fields().flat_map(|field| {
         let json_name = field.json_name();
         let proto_name = field.name();
         let name = if json_name.starts_with(prefix) {
@@ -67,20 +80,77 @@ fn field_candidates_for_message(
         } else if proto_name.starts_with(prefix) {
             proto_name
         } else {
-            return None;
+            ""
         };
-        let value = if path_prefix.is_empty() {
-            name.to_owned()
-        } else if path_prefix.ends_with('.') {
-            format!("{path_prefix}{name}")
-        } else {
-            format!("{path_prefix}.{name}")
-        };
-        Some(Candidate {
-            value,
-            detail: field_kind_label(&field.kind()).into(),
-        })
+
+        let mut candidates = Vec::new();
+        if !name.is_empty() {
+            candidates.push(Candidate {
+                value: join_path(path_prefix, name),
+                detail: field_detail(&field),
+            });
+        }
+
+        if mode == CandidateMode::QueryPath {
+            for local in query_access_candidates(&field) {
+                if local.starts_with(prefix) {
+                    candidates.push(Candidate {
+                        value: join_path(path_prefix, &local),
+                        detail: field_detail(&field),
+                    });
+                }
+            }
+        }
+
+        candidates
     }))
+}
+
+fn join_path(path_prefix: &str, name: &str) -> String {
+    if path_prefix.is_empty() {
+        name.to_owned()
+    } else if path_prefix.ends_with('.') {
+        format!("{path_prefix}{name}")
+    } else {
+        format!("{path_prefix}.{name}")
+    }
+}
+
+fn query_access_candidates(field: &FieldDescriptor) -> Vec<String> {
+    let name = field.json_name();
+    if field.is_map() {
+        vec![format!("{name}[\"<key>\"]")]
+    } else if field.is_list() {
+        vec![format!("{name}[*]"), format!("{name}[0]")]
+    } else {
+        Vec::new()
+    }
+}
+
+fn field_detail(field: &FieldDescriptor) -> String {
+    if field.is_map() {
+        let (key, value) = map_key_value_labels(field);
+        format!("map<{key}, {value}>")
+    } else if field.is_list() {
+        format!("repeated {}", field_kind_label(&field.kind()))
+    } else {
+        field_kind_label(&field.kind()).into()
+    }
+}
+
+fn map_key_value_labels(field: &FieldDescriptor) -> (&'static str, &'static str) {
+    let Kind::Message(entry) = field.kind() else {
+        return ("unknown", "unknown");
+    };
+    let key = entry
+        .get_field_by_name("key")
+        .map(|field| field_kind_label(&field.kind()))
+        .unwrap_or("unknown");
+    let value = entry
+        .get_field_by_name("value")
+        .map(|field| field_kind_label(&field.kind()))
+        .unwrap_or("unknown");
+    (key, value)
 }
 
 fn resolve_query_parent(root: MessageDescriptor, parent_path: &str) -> Result<MessageDescriptor> {
@@ -91,17 +161,26 @@ fn resolve_query_parent(root: MessageDescriptor, parent_path: &str) -> Result<Me
     }
 
     for segment in path.split('.').filter(|segment| !segment.is_empty()) {
+        let field_name = segment_field_name(segment);
+        if field_name == "*" {
+            continue;
+        }
         let field = descriptor
-            .get_field_by_json_name(segment)
-            .or_else(|| descriptor.get_field_by_name(segment))
+            .get_field_by_json_name(field_name)
+            .or_else(|| descriptor.get_field_by_name(field_name))
             .with_context(|| {
-                format!("field {segment:?} not found while resolving {parent_path:?}")
+                format!("field {field_name:?} not found while resolving {parent_path:?}")
             })?;
         descriptor = match field.kind() {
+            Kind::Message(message) if field.is_map() => {
+                map_value_message(&message).with_context(|| {
+                    format!("map field {field_name:?} does not contain message values")
+                })?
+            }
             Kind::Message(message) => message,
             other => {
                 anyhow::bail!(
-                    "field {segment:?} is {}, not a message",
+                    "field {field_name:?} is {}, not a message",
                     field_kind_label(&other)
                 )
             }
@@ -109,6 +188,18 @@ fn resolve_query_parent(root: MessageDescriptor, parent_path: &str) -> Result<Me
     }
 
     Ok(descriptor)
+}
+
+fn segment_field_name(segment: &str) -> &str {
+    segment.split_once('[').map_or(segment, |(name, _)| name)
+}
+
+fn map_value_message(entry: &MessageDescriptor) -> Option<MessageDescriptor> {
+    let value = entry.get_field_by_name("value")?;
+    match value.kind() {
+        Kind::Message(message) => Some(message),
+        _ => None,
+    }
 }
 
 fn split_query_prefix(prefix: &str) -> (&str, &str) {
@@ -163,6 +254,7 @@ mod tests {
     use prost_reflect::DescriptorPool;
     use prost_types::{
         DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        MessageOptions,
         field_descriptor_proto::{Label, Type},
     };
 
@@ -171,6 +263,35 @@ mod tests {
         let pool = test_pool();
         let candidates = query_path_candidates(&pool, "demo.User", "$.profile.n").unwrap();
         assert_eq!(candidates[0].value, "$.profile.name");
+    }
+
+    #[test]
+    fn completes_repeated_query_paths() {
+        let pool = test_pool();
+        let candidates = query_path_candidates(&pool, "demo.User", "$.profiles[").unwrap();
+        let values = candidates
+            .iter()
+            .map(|candidate| candidate.value.as_str())
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"$.profiles[*]"));
+        assert!(values.contains(&"$.profiles[0]"));
+
+        let nested = query_path_candidates(&pool, "demo.User", "$.profiles[*].n").unwrap();
+        assert_eq!(nested[0].value, "$.profiles[*].name");
+    }
+
+    #[test]
+    fn completes_map_query_paths() {
+        let pool = test_pool();
+        let candidates = query_path_candidates(&pool, "demo.User", "$.labels[").unwrap();
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.value == "$.labels[\"<key>\"]")
+        );
+
+        let nested = query_path_candidates(&pool, "demo.User", "$.labels[\"foo\"].n").unwrap();
+        assert_eq!(nested[0].value, "$.labels[\"foo\"].name");
     }
 
     fn test_pool() -> DescriptorPool {
@@ -186,17 +307,65 @@ mod tests {
             }],
             ..Default::default()
         };
+        let labels_entry = DescriptorProto {
+            name: Some("LabelsEntry".into()),
+            field: vec![
+                FieldDescriptorProto {
+                    name: Some("key".into()),
+                    json_name: Some("key".into()),
+                    number: Some(1),
+                    label: Some(Label::Optional as i32),
+                    r#type: Some(Type::String as i32),
+                    ..Default::default()
+                },
+                FieldDescriptorProto {
+                    name: Some("value".into()),
+                    json_name: Some("value".into()),
+                    number: Some(2),
+                    label: Some(Label::Optional as i32),
+                    r#type: Some(Type::Message as i32),
+                    type_name: Some(".demo.Profile".into()),
+                    ..Default::default()
+                },
+            ],
+            options: Some(MessageOptions {
+                map_entry: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         let user = DescriptorProto {
             name: Some("User".into()),
-            field: vec![FieldDescriptorProto {
-                name: Some("profile".into()),
-                json_name: Some("profile".into()),
-                number: Some(1),
-                label: Some(Label::Optional as i32),
-                r#type: Some(Type::Message as i32),
-                type_name: Some(".demo.Profile".into()),
-                ..Default::default()
-            }],
+            field: vec![
+                FieldDescriptorProto {
+                    name: Some("profile".into()),
+                    json_name: Some("profile".into()),
+                    number: Some(1),
+                    label: Some(Label::Optional as i32),
+                    r#type: Some(Type::Message as i32),
+                    type_name: Some(".demo.Profile".into()),
+                    ..Default::default()
+                },
+                FieldDescriptorProto {
+                    name: Some("profiles".into()),
+                    json_name: Some("profiles".into()),
+                    number: Some(2),
+                    label: Some(Label::Repeated as i32),
+                    r#type: Some(Type::Message as i32),
+                    type_name: Some(".demo.Profile".into()),
+                    ..Default::default()
+                },
+                FieldDescriptorProto {
+                    name: Some("labels".into()),
+                    json_name: Some("labels".into()),
+                    number: Some(3),
+                    label: Some(Label::Repeated as i32),
+                    r#type: Some(Type::Message as i32),
+                    type_name: Some(".demo.User.LabelsEntry".into()),
+                    ..Default::default()
+                },
+            ],
+            nested_type: vec![labels_entry],
             ..Default::default()
         };
         let set = FileDescriptorSet {

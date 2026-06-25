@@ -48,6 +48,7 @@ struct Renderer<'a> {
 struct Item<'a> {
     node: Node<'a>,
     leading_comments: Vec<Node<'a>>,
+    trailing_comments: Vec<Node<'a>>,
 }
 
 impl<'a> Renderer<'a> {
@@ -78,8 +79,9 @@ impl<'a> Renderer<'a> {
                 out.push('\n');
             }
 
-            let rendered = self.render_node(item.node, indent);
+            let mut rendered = self.render_node(item.node, indent);
             if !rendered.is_empty() {
+                append_trailing_comments(&mut rendered, &item.trailing_comments, self.source);
                 out.push_str(&rendered);
                 out.push('\n');
             }
@@ -94,8 +96,17 @@ impl<'a> Renderer<'a> {
 
     fn render_node(&mut self, node: Node<'a>, indent: usize) -> String {
         match node.kind() {
-            "syntax" | "edition" | "package" | "import" | "option" | "reserved" | "extensions"
-            | "field" | "map_field" | "oneof_field" | "enum_field" | "rpc" | "empty_statement" => {
+            "option" => self.render_option(node, indent),
+            "rpc" => self.render_rpc(node, indent),
+            "field" | "map_field" | "oneof_field" | "enum_field" => self.render_field(node, indent),
+            "reserved" | "extensions" => {
+                format!(
+                    "{}{}",
+                    indent_text(indent),
+                    normalize_reserved_or_extensions(self.node_text(node))
+                )
+            }
+            "syntax" | "edition" | "package" | "import" | "empty_statement" => {
                 format!(
                     "{}{}",
                     indent_text(indent),
@@ -155,6 +166,92 @@ impl<'a> Renderer<'a> {
                 out.push_str(&indent_text(indent));
             }
         }
+        out.push('}');
+        out
+    }
+
+    fn render_field(&self, node: Node<'a>, indent: usize) -> String {
+        let text = self.node_text(node);
+        if !text.contains('\n') || !text.contains('[') {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        }
+
+        let Some(open) = text.find('[') else {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        };
+        let Some(close) = text.rfind(']') else {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        };
+
+        let prefix = normalize_statement(text[..open].trim().trim_end_matches(';'));
+        let options = &text[open + 1..close];
+        let mut out = format!("{}{} [", indent_text(indent), prefix.trim_end());
+        for line in options
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            out.push('\n');
+            out.push_str(&indent_text(indent + 1));
+            out.push_str(&normalize_multiline_option_line(line));
+        }
+        out.push('\n');
+        out.push_str(&indent_text(indent));
+        out.push_str("];");
+        out
+    }
+
+    fn render_option(&self, node: Node<'a>, indent: usize) -> String {
+        let text = self.node_text(node);
+        if !text.contains('\n') || !text.contains('{') {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        }
+
+        let Some(open) = text.find('{') else {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        };
+        let Some(close) = text.rfind('}') else {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        };
+
+        let prefix = normalize_option_prefix(text[..open].trim().trim_end_matches(';'));
+        let body = &text[open + 1..close];
+        let mut out = format!("{}{} {{", indent_text(indent), prefix.trim_end());
+        for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            out.push('\n');
+            out.push_str(&indent_text(indent + 1));
+            out.push_str(line);
+        }
+        out.push('\n');
+        out.push_str(&indent_text(indent));
+        out.push_str("};");
+        out
+    }
+
+    fn render_rpc(&self, node: Node<'a>, indent: usize) -> String {
+        let text = self.node_text(node);
+        if !text.contains('{') {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        }
+
+        let Some(open) = text.find('{') else {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        };
+        let Some(close) = text.rfind('}') else {
+            return format!("{}{}", indent_text(indent), normalize_statement(text));
+        };
+
+        let prefix = normalize_rpc_prefix(text[..open].trim().trim_end_matches(';'));
+        let body = &text[open + 1..close];
+        let mut out = format!("{}{} {{", indent_text(indent), prefix.trim_end());
+        for statement in split_inline_statements(body) {
+            out.push('\n');
+            out.push_str(&indent_text(indent + 1));
+            out.push_str(&normalize_statement(statement));
+            out.push(';');
+        }
+        out.push('\n');
+        out.push_str(&indent_text(indent));
         out.push('}');
         out
     }
@@ -225,13 +322,24 @@ impl<'a> Renderer<'a> {
         let mut comments = Vec::new();
         for child in self.named_children(node) {
             match child.kind() {
+                "comment"
+                    if items.last().is_some_and(|item: &Item<'_>| {
+                        item.node.end_position().row == child.start_position().row
+                    }) =>
+                {
+                    if let Some(item) = items.last_mut() {
+                        item.trailing_comments.push(child);
+                    }
+                }
                 "comment" => comments.push(child),
                 "empty_statement" => {}
                 kind if is_name_or_body_kind(kind) => {}
                 _ => {
+                    flush_detached_comments(&mut items, &mut comments, child);
                     items.push(Item {
                         node: child,
                         leading_comments: std::mem::take(&mut comments),
+                        trailing_comments: Vec::new(),
                     });
                 }
             }
@@ -240,6 +348,7 @@ impl<'a> Renderer<'a> {
             items.push(Item {
                 node: comment,
                 leading_comments: Vec::new(),
+                trailing_comments: Vec::new(),
             });
         }
         items
@@ -447,6 +556,106 @@ fn normalize_statement(text: &str) -> String {
     normalized.trim().to_owned()
 }
 
+fn normalize_option_prefix(text: &str) -> String {
+    normalize_statement(text).replace("option(", "option (")
+}
+
+fn normalize_rpc_prefix(text: &str) -> String {
+    normalize_statement(text).replace(" returns(", " returns (")
+}
+
+fn normalize_multiline_option_line(line: &str) -> String {
+    let has_comma = line.trim_end().ends_with(',');
+    let mut normalized = normalize_statement(line.trim_end_matches(','));
+    if has_comma {
+        normalized.push(',');
+    }
+    normalized
+}
+
+fn normalize_reserved_or_extensions(text: &str) -> String {
+    normalize_range_keywords(&normalize_statement(text))
+}
+
+fn normalize_range_keywords(text: &str) -> String {
+    let mut out = String::new();
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index..].starts_with(&['t', 'o'])
+            && index > 0
+            && index + 2 < chars.len()
+            && chars[index - 1].is_ascii_digit()
+            && (chars[index + 2].is_ascii_digit()
+                || chars[index + 2].is_ascii_alphabetic()
+                || chars[index + 2].is_whitespace())
+        {
+            if !out.ends_with(' ') {
+                out.push(' ');
+            }
+            out.push_str("to");
+            if index + 2 < chars.len() && chars[index + 2] != ' ' {
+                out.push(' ');
+            }
+            index += 2;
+        } else {
+            out.push(chars[index]);
+            index += 1;
+        }
+    }
+    out
+}
+
+fn split_inline_statements(text: &str) -> Vec<&str> {
+    let statements = text
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| !statement.is_empty())
+        .collect::<Vec<_>>();
+    if statements.is_empty() {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect()
+    } else {
+        statements
+    }
+}
+
+fn append_trailing_comments(out: &mut String, comments: &[Node<'_>], source: &str) {
+    const TRAILING_COMMENT_COLUMN: usize = 48;
+    for comment in comments {
+        let text = node_text(*comment, source).trim();
+        if !text.is_empty() {
+            let current_column = out.rsplit('\n').next().map(str::len).unwrap_or(0);
+            let spaces = TRAILING_COMMENT_COLUMN
+                .saturating_sub(current_column)
+                .max(2);
+            out.push_str(&" ".repeat(spaces));
+            out.push_str(text);
+        }
+    }
+}
+
+fn flush_detached_comments<'a>(
+    items: &mut Vec<Item<'a>>,
+    comments: &mut Vec<Node<'a>>,
+    next_node: Node<'a>,
+) {
+    if comments
+        .last()
+        .is_some_and(|comment| next_node.start_position().row > comment.end_position().row + 1)
+    {
+        for comment in std::mem::take(comments) {
+            items.push(Item {
+                node: comment,
+                leading_comments: Vec::new(),
+                trailing_comments: Vec::new(),
+            });
+        }
+    }
+}
+
 fn indent_text(indent: usize) -> String {
     "  ".repeat(indent)
 }
@@ -474,7 +683,9 @@ message A {}
     #[test]
     fn can_skip_all_sorting() {
         let input = r#"syntax = "proto3";
-message Z {}
+import "z.proto";
+import "a.proto";
+message Z { string b = 2; string a = 1; }
 message A {}
 "#;
         let output = format_proto(
@@ -487,7 +698,11 @@ message A {}
             },
         )
         .unwrap();
+        assert!(
+            output.find("import \"z.proto\"").unwrap() < output.find("import \"a.proto\"").unwrap()
+        );
         assert!(output.find("message Z").unwrap() < output.find("message A").unwrap());
+        assert!(output.find("string b = 2").unwrap() < output.find("string a = 1").unwrap());
     }
 
     #[test]
@@ -500,6 +715,41 @@ message Labels { map<string, string> labels=1; }
     }
 
     #[test]
+    fn keeps_inline_field_options_compact() {
+        let input = r#"syntax = "proto3";
+message Foo { string name = 1 [deprecated=true, json_name="fullName"]; }
+"#;
+        let output = format_proto(input, FormatOptions::default()).unwrap();
+        assert!(output.contains("string name = 1 [deprecated = true, json_name = \"fullName\"];"));
+    }
+
+    #[test]
+    fn formats_multiline_field_options() {
+        let input = r#"syntax = "proto3";
+message Foo {
+  string name = 1 [
+      deprecated=true,
+    json_name="fullName"
+  ];
+}
+"#;
+        let output = format_proto(input, FormatOptions::default()).unwrap();
+        assert!(output.contains(
+            "string name = 1 [\n    deprecated = true,\n    json_name = \"fullName\"\n  ];"
+        ));
+    }
+
+    #[test]
+    fn formats_reserved_and_extensions_ranges() {
+        let input = r#"syntax = "proto3";
+message Foo { reserved 2to5, 9; extensions 100to max; }
+"#;
+        let output = format_proto(input, FormatOptions::default()).unwrap();
+        assert!(output.contains("reserved 2 to 5, 9;"));
+        assert!(output.contains("extensions 100 to max;"));
+    }
+
+    #[test]
     fn formats_nested_blocks_from_cst() {
         let input = r#"syntax = "proto3";
 message Outer { message Z {} message A {} enum E { TWO = 2; ONE = 1; } string b=2; string a=1; }
@@ -508,6 +758,52 @@ message Outer { message Z {} message A {} enum E { TWO = 2; ONE = 1; } string b=
         assert!(output.contains("message A {}") || output.contains("message A {\n}"));
         assert!(output.find("message A").unwrap() < output.find("message Z").unwrap());
         assert!(output.find("string a = 1").unwrap() < output.find("string b = 2").unwrap());
+    }
+
+    #[test]
+    fn preserves_trailing_comments_with_sorted_items() {
+        let input = r#"syntax = "proto3";
+message Foo { string b = 2; // b field
+string a = 1; // a field
+}
+"#;
+        let output = format_proto(input, FormatOptions::default()).unwrap();
+        assert!(output.contains("string a = 1;                                 // a field"));
+        assert!(output.contains("string b = 2;                                 // b field"));
+        assert!(output.find("string a = 1").unwrap() < output.find("string b = 2").unwrap());
+    }
+
+    #[test]
+    fn does_not_move_detached_comments_with_sorted_declarations() {
+        let input = r#"syntax = "proto3";
+// detached
+
+message Z {}
+message A {}
+"#;
+        let output = format_proto(input, FormatOptions::default()).unwrap();
+        assert!(output.find("// detached").unwrap() < output.find("message A").unwrap());
+        assert!(output.find("// detached").unwrap() < output.find("message Z").unwrap());
+    }
+
+    #[test]
+    fn formats_multiline_option_blocks_and_rpc_bodies() {
+        let input = r#"syntax = "proto3";
+message Foo {
+  option (demo.option) = {
+      enabled: true
+    name: "foo"
+  };
+}
+service FooService { rpc Get (Foo) returns (Foo) { option deprecated=true; } }
+"#;
+        let output = format_proto(input, FormatOptions::default()).unwrap();
+        assert!(
+            output.contains("option (demo.option) = {\n    enabled: true\n    name: \"foo\"\n  };")
+        );
+        assert!(
+            output.contains("rpc Get(Foo) returns (Foo) {\n    option deprecated = true;\n  }")
+        );
     }
 
     #[test]

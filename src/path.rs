@@ -5,6 +5,7 @@ use serde_json::Value;
 pub enum Segment {
     Key(String),
     Index(usize),
+    Wildcard,
 }
 
 pub fn parse_path(input: &str) -> Result<Vec<Segment>> {
@@ -18,6 +19,11 @@ pub fn parse_path(input: &str) -> Result<Vec<Segment>> {
         match ch {
             '.' => {
                 chars.next();
+                if matches!(chars.peek(), Some('*')) {
+                    chars.next();
+                    segments.push(Segment::Wildcard);
+                    continue;
+                }
                 let mut key = String::new();
                 while let Some(next) = chars.peek().copied() {
                     if next == '.' || next == '[' {
@@ -33,7 +39,13 @@ pub fn parse_path(input: &str) -> Result<Vec<Segment>> {
             }
             '[' => {
                 chars.next();
-                if matches!(chars.peek(), Some('"') | Some('\'')) {
+                if matches!(chars.peek(), Some('*')) {
+                    chars.next();
+                    if chars.next() != Some(']') {
+                        bail!("unterminated wildcard in {input:?}");
+                    }
+                    segments.push(Segment::Wildcard);
+                } else if matches!(chars.peek(), Some('"') | Some('\'')) {
                     let quote = chars.next().unwrap();
                     let mut key = String::new();
                     for next in chars.by_ref() {
@@ -72,14 +84,54 @@ pub fn parse_path(input: &str) -> Result<Vec<Segment>> {
 }
 
 pub fn select<'a>(value: &'a Value, path: &[Segment]) -> Option<&'a Value> {
-    let mut current = value;
+    select_many(value, path).into_iter().next()
+}
+
+pub fn select_many<'a>(value: &'a Value, path: &[Segment]) -> Vec<&'a Value> {
+    let mut current = vec![value];
     for segment in path {
-        match segment {
-            Segment::Key(key) => current = current.get(key)?,
-            Segment::Index(index) => current = current.get(*index)?,
+        let mut next = Vec::new();
+        for value in current {
+            match segment {
+                Segment::Key(key) => select_key(value, key, &mut next),
+                Segment::Index(index) => {
+                    if let Some(item) = value.get(*index) {
+                        next.push(item);
+                    }
+                }
+                Segment::Wildcard => select_wildcard(value, &mut next),
+            }
+        }
+        current = next;
+        if current.is_empty() {
+            break;
         }
     }
-    Some(current)
+    current
+}
+
+fn select_key<'a>(value: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Object(_) => {
+            if let Some(item) = value.get(key) {
+                out.push(item);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                select_key(item, key, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn select_wildcard<'a>(value: &'a Value, out: &mut Vec<&'a Value>) {
+    match value {
+        Value::Array(items) => out.extend(items),
+        Value::Object(object) => out.extend(object.values()),
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +148,36 @@ mod tests {
                 Segment::Key("data".into())
             ]
         );
+    }
+
+    #[test]
+    fn parses_wildcards() {
+        assert_eq!(
+            parse_path("$.items[*].id").unwrap(),
+            vec![
+                Segment::Key("items".into()),
+                Segment::Wildcard,
+                Segment::Key("id".into())
+            ]
+        );
+        assert_eq!(parse_path("$.*").unwrap(), vec![Segment::Wildcard]);
+    }
+
+    #[test]
+    fn selects_many_with_wildcards_and_array_flattening() {
+        let value = serde_json::json!({
+            "items": [
+                { "id": 1, "labels": { "name": "a" } },
+                { "id": 2, "labels": { "name": "b" } }
+            ]
+        });
+        let wildcard_path = parse_path("$.items[*].id").unwrap();
+        let flattened_path = parse_path("$.items.id").unwrap();
+        let wildcard = select_many(&value, &wildcard_path);
+        let flattened = select_many(&value, &flattened_path);
+        assert_eq!(wildcard.len(), 2);
+        assert_eq!(wildcard[0], &serde_json::json!(1));
+        assert_eq!(wildcard[1], &serde_json::json!(2));
+        assert_eq!(flattened, wildcard);
     }
 }
