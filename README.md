@@ -13,6 +13,12 @@
 cargo install --path .
 ```
 
+After the crate is published:
+
+```sh
+cargo install pbkit
+```
+
 ## Usage
 
 Sort a proto file in place:

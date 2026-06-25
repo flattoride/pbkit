@@ -2,19 +2,21 @@
 name = "pbkit"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "A pragmatic protobuf CLI for sorting .proto files and querying protobuf binaries."
 repository = "https://github.com/flattoride/pbkit"
+readme = "README.md"
+keywords = ["protobuf", "proto", "cli", "jsonpath", "wire"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0.100"
 base64 = "0.22.1"
-bytes = "1.11.0"
 clap = { version = "4.5.53", features = ["derive"] }
 hex = "0.4.3"
 prost = "0.14.1"
 prost-reflect = { version = "0.16.4", features = ["serde"] }
 prost-types = "0.14.1"
 protox = "0.9.1"
-serde = { version = "1.0.228", features = ["derive"] }
 serde_json = { version = "1.0.145", features = ["preserve_order"] }
